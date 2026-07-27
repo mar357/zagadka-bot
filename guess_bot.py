@@ -11,12 +11,16 @@
 5. Бот молча сверяет каждое новое сообщение с сохранённым ответом
     (первое совпадение = победитель, автор загадки исключён из проверки)
 6. Раз в день в 20:00 по Москве бот проверяет: если победитель есть -
-    объявляет в чат и закрывает загадку. Если никто не угадал - молчит,
-    загадка остаётся активной до следующего дня.
+    объявляет в чат, начисляет очки автору и победителю и закрывает загадку.
+    Если никто не угадал - молчит, загадка остаётся активной до след. дня.
+7. По понедельникам - топ недели в чат, 1 числа месяца - топ месяца.
+8. Раз в неделю (понедельник) - зашифрованный бэкап state.json в backups/.
+9. Раз в день около 17:00 МСК - бот шлёт админу "я жив" в личку.
 
 Скрипт запускается по крону (через cron-job.org -> workflow_dispatch),
 каждый запуск: забирает новые апдейты от Telegram, обрабатывает их,
-проверяет не пора ли объявить победителя, сохраняет состояние и выходит.
+проверяет не пора ли объявить победителя/топ/бэкап/healthcheck,
+сохраняет состояние и выходит.
 
 Все чувствительные данные (кто загадал, ответ, file_id фото, кто угадал)
 хранятся в state.json в зашифрованном виде (Fernet), т.к. репозиторий
@@ -43,6 +47,7 @@ ENCRYPT_KEY = os.environ["ENCRYPT_KEY"]
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 STATE_FILE = "state.json"
+BACKUP_DIR = "backups"
 MATCH_THRESHOLD = 0.8  # допуск на опечатки, но не совсем разные слова
 
 MOSCOW_OFFSET = timedelta(hours=3)  # Москва без перехода на летнее время
@@ -56,6 +61,15 @@ def now_msk():
 
 def today_str():
     return now_msk().strftime("%Y-%m-%d")
+
+
+def week_key_str(dt):
+    iso_year, iso_week, _ = dt.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
+
+
+def month_key_str(dt):
+    return dt.strftime("%Y-%m")
 
 
 # ---------- шифрование состояния ----------
@@ -75,6 +89,12 @@ def default_state():
         "active_riddle": None,   # см. структуру ниже
         "pending": {},           # user_id(str) -> {"stage": ..., "photo_file_id": ...}
         "last_announced_date": None,
+        "scores": {},             # user_id(str) -> очки
+        "names": {},               # user_id(str) -> последнее известное имя
+        "last_weekly_post": None,   # "YYYY-Wnn"
+        "last_monthly_post": None,  # "YYYY-MM"
+        "last_backup_week": None,   # "YYYY-Wnn"
+        "last_healthcheck_date": None,
     }
 
 # active_riddle = {
@@ -97,7 +117,11 @@ def load_state(fernet):
         if not token:
             return default_state()
         decrypted = fernet.decrypt(token.encode()).decode()
-        return json.loads(decrypted)
+        state = json.loads(decrypted)
+        # подстраховка для старых state.json без новых полей
+        for key, value in default_state().items():
+            state.setdefault(key, value)
+        return state
     except (InvalidToken, json.JSONDecodeError, KeyError):
         # файл повреждён или ключ не тот - начинаем с чистого состояния,
         # чтобы бот не падал намертво
@@ -159,6 +183,38 @@ def message_matches_answer(text, answer):
     return any(is_close_match(c, answer) for c in candidates)
 
 
+# ---------- очки и имена ----------
+
+def remember_name(state, user_id, user):
+    if not user_id:
+        return
+    uid = str(user_id)
+    name = user.get("first_name") or user.get("username") or "Кто-то"
+    state["names"][uid] = name
+
+
+def award_points(state, user_id, amount):
+    if not user_id:
+        return
+    uid = str(user_id)
+    state["scores"][uid] = state["scores"].get(uid, 0) + amount
+
+
+def format_leaderboard(state, top_n=10):
+    scores = state.get("scores", {})
+    if not scores:
+        return None
+    names = state.get("names", {})
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (uid, pts) in enumerate(ranked):
+        marker = medals[i] if i < len(medals) else f"{i + 1}."
+        name = names.get(uid, f"игрок {uid}")
+        lines.append(f"{marker} {name} — {pts} очк.")
+    return "\n".join(lines)
+
+
 # ---------- обработка личных сообщений ----------
 
 def handle_private_message(state, user_id, user, text_raw, photo):
@@ -202,6 +258,21 @@ def handle_private_message(state, user_id, user, text_raw, photo):
             else:
                 send_message(CHAT_ID, parts[1])
                 send_message(user_id, "Отправлено в чат")
+            return True
+
+        if text_cmd == "/подсказка":
+            riddle = state["active_riddle"]
+            if not riddle:
+                send_message(user_id, "Активной загадки нет, подсказывать нечего")
+            else:
+                first_letter = riddle["answer"].strip()[0].upper()
+                send_message(CHAT_ID, f"💡 Подсказка: слово начинается на букву «{first_letter}»")
+                send_message(user_id, "Подсказка отправлена в чат")
+            return True
+
+        if text_cmd == "/топ":
+            text = format_leaderboard(state)
+            send_message(user_id, text or "Пока ни у кого нет очков")
             return True
 
     # --- начать новую загадку ---
@@ -284,13 +355,20 @@ def reply_status(state, admin_id):
     send_message(admin_id, text)
 
 
+def announce_winner(state, riddle):
+    """Общая логика объявления победителя: сообщение в чат + начисление очков."""
+    text = f"🎉 {riddle['winner_name']} угадал(а)! Ответ был: {riddle['answer']}"
+    send_message(CHAT_ID, text)
+    award_points(state, riddle["winner_id"], 1)
+    award_points(state, riddle["author_id"], 1)
+    state["active_riddle"] = None
+
+
 def force_check_announcement(state):
     riddle = state["active_riddle"]
     if riddle and riddle.get("winner_id"):
-        text = f"🎉 {riddle['winner_name']} угадал(а)! Ответ был: {riddle['answer']}"
-        send_message(CHAT_ID, text)
-        send_message(ADMIN_ID, "[тест] Объявление отправлено, загадка закрыта")
-        state["active_riddle"] = None
+        announce_winner(state, riddle)
+        send_message(ADMIN_ID, "[тест] Объявление отправлено, очки начислены, загадка закрыта")
     else:
         send_message(ADMIN_ID, "[тест] Пока никто не угадал, объявления не будет")
 
@@ -326,11 +404,68 @@ def check_daily_announcement(state):
 
     riddle = state["active_riddle"]
     if riddle and riddle.get("winner_id"):
-        text = f"🎉 {riddle['winner_name']} угадал(а)! Ответ был: {riddle['answer']}"
-        send_message(CHAT_ID, text)
-        state["active_riddle"] = None
+        announce_winner(state, riddle)
 
     state["last_announced_date"] = today
+
+
+# ---------- еженедельный/ежемесячный топ ----------
+
+def check_periodic_leaderboard(state):
+    now = now_msk()
+
+    # по понедельникам - топ недели
+    if now.weekday() == 0:
+        wk = week_key_str(now)
+        if state.get("last_weekly_post") != wk:
+            text = format_leaderboard(state)
+            if text:
+                send_message(CHAT_ID, "📅 Итоги недели:\n" + text)
+            state["last_weekly_post"] = wk
+
+    # 1 числа месяца - топ месяца
+    if now.day == 1:
+        mk = month_key_str(now)
+        if state.get("last_monthly_post") != mk:
+            text = format_leaderboard(state)
+            if text:
+                send_message(CHAT_ID, "🗓 Итоги месяца:\n" + text)
+            state["last_monthly_post"] = mk
+
+
+# ---------- еженедельный бэкап state ----------
+
+def check_weekly_backup(state, fernet):
+    now = now_msk()
+    if now.weekday() != 0:  # только по понедельникам
+        return
+    wk = week_key_str(now)
+    if state.get("last_backup_week") == wk:
+        return
+
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    backup_path = os.path.join(BACKUP_DIR, f"state_{now.strftime('%Y-%m-%d')}.json")
+    payload = json.dumps(state, ensure_ascii=False).encode()
+    token = fernet.encrypt(payload).decode()
+    with open(backup_path, "w", encoding="utf-8") as f:
+        json.dump({"data": token}, f)
+
+    state["last_backup_week"] = wk
+
+
+# ---------- healthcheck ----------
+
+def check_healthcheck(state):
+    now = now_msk()
+    today = today_str()
+
+    if now.hour != 17:
+        return
+    if state.get("last_healthcheck_date") == today:
+        return
+
+    send_message(ADMIN_ID, f"✅ Бот жив, всё работает. {now.strftime('%d.%m.%Y %H:%M')} МСК")
+    state["last_healthcheck_date"] = today
 
 
 # ---------- основной цикл ----------
@@ -355,6 +490,8 @@ def main():
         text_raw = (msg.get("text") or msg.get("caption") or "").strip()
         photo = msg.get("photo")
 
+        remember_name(state, user_id, user)
+
         if chat["type"] == "private":
             handle_private_message(state, user_id, user, text_raw, photo)
         elif chat["id"] == CHAT_ID:
@@ -364,6 +501,9 @@ def main():
     state["last_update_id"] = max_update_id
 
     check_daily_announcement(state)
+    check_periodic_leaderboard(state)
+    check_weekly_backup(state, fernet)
+    check_healthcheck(state)
 
     save_state(fernet, state)
 
