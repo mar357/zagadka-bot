@@ -34,4 +34,4 @@ jobs:
           git config --global user.name "zagadka-bot"
           git add state.json || true
           git commit -m "Bot state update" || true
-          git push || true
+          git push origin main || true
