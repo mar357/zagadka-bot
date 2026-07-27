@@ -179,6 +179,31 @@ def handle_private_message(state, user_id, user, text_raw, photo):
             send_message(user_id, "Состояние сброшено")
             return True
 
+        if text_cmd == "/тест_победитель":
+            riddle = state["active_riddle"]
+            if not riddle:
+                send_message(user_id, "[тест] Активной загадки нет")
+            elif riddle.get("winner_id"):
+                send_message(user_id, "[тест] Победитель уже назначен")
+            else:
+                riddle["winner_id"] = ADMIN_ID
+                riddle["winner_name"] = "Тестовый победитель"
+                send_message(user_id, "[тест] Победитель назначен ботом, можно проверять /тест_время")
+            return True
+
+        if text_cmd == "/тест_пинг":
+            send_message(user_id, f"[тест] Бот жив, время сейчас: {now_msk().strftime('%H:%M:%S')}")
+            return True
+
+        if text_raw.lower().startswith("/broadcast"):
+            parts = text_raw.split(maxsplit=1)
+            if len(parts) < 2:
+                send_message(user_id, "Напиши текст после команды: /broadcast текст")
+            else:
+                send_message(CHAT_ID, parts[1])
+                send_message(user_id, "Отправлено в чат")
+            return True
+
     # --- начать новую загадку ---
     if text_cmd == "/загадать":
         if state["active_riddle"]:
