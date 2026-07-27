@@ -3,6 +3,10 @@ name: zagadka-bot
 on:
   workflow_dispatch:
 
+concurrency:
+  group: zagadka-bot
+  cancel-in-progress: false
+
 jobs:
   bot:
     runs-on: ubuntu-latest
@@ -32,6 +36,7 @@ jobs:
         run: |
           git config --global user.email "bot@example.com"
           git config --global user.name "zagadka-bot"
+          git pull --rebase origin main || true
           git add state.json backups/ || true
           git commit -m "Bot state update" || true
           git push origin main || true
