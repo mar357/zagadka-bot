@@ -253,11 +253,17 @@ def handle_private_message(state, user_id, user, text_raw, photo):
 
         if text_raw.lower().startswith("/broadcast"):
             parts = text_raw.split(maxsplit=1)
-            if len(parts) < 2:
-                send_message(user_id, "Напиши текст после команды: /broadcast текст")
-            else:
-                send_message(CHAT_ID, parts[1])
+            caption = parts[1] if len(parts) > 1 else None
+
+            if photo:
+                file_id = photo[-1]["file_id"]
+                send_photo(CHAT_ID, file_id, caption=caption)
+                send_message(user_id, "Фото отправлено в чат")
+            elif caption:
+                send_message(CHAT_ID, caption)
                 send_message(user_id, "Отправлено в чат")
+            else:
+                send_message(user_id, "Напиши текст после команды (/broadcast текст) или пришли фото с подписью /broadcast текст")
             return True
 
         if text_cmd == "/подсказка":
