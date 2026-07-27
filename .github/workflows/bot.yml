@@ -28,10 +28,10 @@ jobs:
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: python guess_bot.py
       
-      - name: Commit state changes
+      - - name: Commit state changes
         run: |
           git config --global user.email "bot@example.com"
           git config --global user.name "zagadka-bot"
-          git add state.json || true
+          git add state.json backups/ || true
           git commit -m "Bot state update" || true
           git push origin main || true
