@@ -220,6 +220,10 @@ def handle_private_message(state, user_id, user, text_raw, photo):
         send_message(user_id, "Принято! Опубликовал в чат 🔍")
         return True
 
+    # ✅ Молчим на случайные сообщения если пользователь не в процессе загадки
+    if not pending and not text_cmd.startswith("/"):
+        return False
+
     return False
 
 
@@ -292,6 +296,7 @@ def main():
     fernet = get_fernet()
     state = load_state(fernet)
 
+    # получаем ТОЛЬКО новые апдейты (после последнего обработанного)
     updates = get_updates(offset=state["last_update_id"] + 1)
     max_update_id = state["last_update_id"]
 
@@ -312,6 +317,7 @@ def main():
         elif chat["id"] == CHAT_ID:
             handle_group_message(state, user, text_raw)
 
+    # ✅ ОБЯЗАТЕЛЬНО СОХРАНЯЙ НОВЫЙ max_update_id
     state["last_update_id"] = max_update_id
 
     check_daily_announcement(state)
