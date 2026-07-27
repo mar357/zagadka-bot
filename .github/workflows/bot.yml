@@ -1,23 +1,25 @@
 name: zagadka-bot
+
 on:
   workflow_dispatch:
+
 jobs:
   bot:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: pip install -r requirements.txt
-      
+
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -25,44 +27,8 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: python guess_bot.py
-      
+
       - name: Commit state changes
-        run: |
-          git config --global user.email "bot@example.com"
-          git config --global user.name "zagadka-bot"
-          git add state.json backups/ || true
-          git commit -m "Bot state update" || true
-          git push origin main || truename: zagadka-bot
-
-on:
-  workflow_dispatch:
-
-jobs:
-  bot:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-      
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      
-      - name: Run bot
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          ADMIN_ID: ${{ secrets.ADMIN_ID }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
-        run: python guess_bot.py
-      
-      - - name: Commit state changes
         run: |
           git config --global user.email "bot@example.com"
           git config --global user.name "zagadka-bot"
