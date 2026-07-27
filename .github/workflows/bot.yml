@@ -36,7 +36,8 @@ jobs:
         run: |
           git config --global user.email "bot@example.com"
           git config --global user.name "zagadka-bot"
-          git add state.json backups/ || true
-          git status
-          git commit -m "Bot state update"
-          git push origin main
+          git pull --rebase origin main || true
+          git add state.json || true
+          if [ -d "backups" ]; then git add backups/; fi
+          git commit -m "Bot state update" || true
+          git push origin main || true
