@@ -5,6 +5,7 @@
 Механика:
 1. Кто угодно пишет боту в личку /загадать
 2. Бот просит фото крупным планом -> потом просит написать что это
+   (если фото сразу с подписью-названием - публикует сразу, без доп. шага)
 3. Бот публикует фото в общий чат (без подписи кто загадал)
 4. Люди пишут версии ответа прямо в чат обычными сообщениями
 5. Бот молча сверяет каждое новое сообщение с сохранённым ответом
@@ -184,7 +185,7 @@ def handle_private_message(state, user_id, user, text_raw, photo):
             send_message(user_id, "Сейчас уже есть активная загадка, дождись пока её отгадают")
         else:
             state["pending"][uid] = {"stage": "awaiting_photo"}
-            send_message(user_id, "Приши мне фото крупным планом")
+            send_message(user_id, "Приши мне фото крупным планом (можно сразу с подписью - названием предмета, тогда отвечать отдельным сообщением не понадобится)")
         return True
 
     # --- отменить свою загадку ---
@@ -202,6 +203,23 @@ def handle_private_message(state, user_id, user, text_raw, photo):
 
     if pending and pending["stage"] == "awaiting_photo" and photo:
         file_id = photo[-1]["file_id"]  # берём самое большое разрешение
+
+        if text_raw:
+            # фото пришло сразу с подписью (названием) - публикуем сразу, без доп. шага
+            state["active_riddle"] = {
+                "author_id": user_id,
+                "answer": text_raw.strip(),
+                "photo_file_id": file_id,
+                "created_date": today_str(),
+                "winner_id": None,
+                "winner_name": None,
+            }
+            state["pending"].pop(uid, None)
+            send_photo(CHAT_ID, file_id, caption="Угадайте что это? 🔍")
+            send_message(user_id, "Принято! Опубликовал в чат 🔍")
+            return True
+
+        # фото без подписи - как раньше, просим название отдельным сообщением
         state["pending"][uid] = {"stage": "awaiting_answer", "photo_file_id": file_id}
         send_message(user_id, "Записал! А теперь напиши, что это")
         return True
