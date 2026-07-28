@@ -3,7 +3,7 @@
 Бот для семейной игры "Фото-угадайка".
 
 Механика:
-1. Кто угодно пишет боту в личку /загадать
+1. Кто угодно пишет боту в личку /загадать (или просто "загадать", без слеша)
 2. Бот просит фото крупным планом -> потом просит написать что это
    (если фото сразу с подписью-названием - публикует сразу, без доп. шага)
 3. Бот публикует фото в общий чат (без подписи кто загадал)
@@ -11,11 +11,14 @@
 5. Бот молча сверяет каждое новое сообщение с сохранённым ответом
     (первое совпадение = победитель, автор загадки исключён из проверки)
 6. Раз в день в 20:00 по Москве бот проверяет: если победитель есть -
-    объявляет в чат, начисляет очки автору и победителю и закрывает загадку.
+    объявляет в чат, начисляет +1 автору и +1 победителю и закрывает загадку.
     Если никто не угадал - молчит, загадка остаётся активной до след. дня.
 7. По понедельникам - топ недели в чат, 1 числа месяца - топ месяца.
 8. Раз в неделю (понедельник) - зашифрованный бэкап state.json в backups/.
 9. Раз в день около 17:00 МСК - бот шлёт админу "я жив" в личку.
+
+Команды можно писать как со слешем (/загадать), так и без него (загадать) -
+удобнее печатать на русской раскладке, где слеш неудобно набирать.
 
 Скрипт запускается по крону (через cron-job.org -> workflow_dispatch),
 каждый запуск: забирает новые апдейты от Telegram, обрабатывает их,
@@ -89,7 +92,7 @@ def default_state():
         "active_riddle": None,   # см. структуру ниже
         "pending": {},           # user_id(str) -> {"stage": ..., "photo_file_id": ...}
         "last_announced_date": None,
-        "scores": {},             # user_id(str) -> очки
+        "scores": {},             # user_id(str) -> количество побед/загадок (+1 за каждую)
         "names": {},               # user_id(str) -> последнее известное имя
         "last_weekly_post": None,   # "YYYY-Wnn"
         "last_monthly_post": None,  # "YYYY-MM"
@@ -183,6 +186,24 @@ def message_matches_answer(text, answer):
     return any(is_close_match(c, answer) for c in candidates)
 
 
+# ---------- разбор команд (со слешем и без) ----------
+
+def extract_command(text_raw):
+    """
+    Возвращает (cmd, rest), где cmd - слово-команда БЕЗ слеша и без @BotName,
+    rest - всё что после команды (например текст для /broadcast).
+    Работает и с "/загадать", и просто с "загадать".
+    """
+    text = text_raw.strip()
+    if not text:
+        return None, ""
+    parts = text.split(maxsplit=1)
+    first = parts[0].lower().split("@")[0]
+    cmd = first[1:] if first.startswith("/") else first
+    rest = parts[1] if len(parts) > 1 else ""
+    return cmd, rest
+
+
 # ---------- очки и имена ----------
 
 def remember_name(state, user_id, user):
@@ -211,7 +232,7 @@ def format_leaderboard(state, top_n=10):
     for i, (uid, pts) in enumerate(ranked):
         marker = medals[i] if i < len(medals) else f"{i + 1}."
         name = names.get(uid, f"игрок {uid}")
-        lines.append(f"{marker} {name} — {pts} очк.")
+        lines.append(f"{marker} {name} — {pts}")
     return "\n".join(lines)
 
 
@@ -219,85 +240,88 @@ def format_leaderboard(state, top_n=10):
 
 def handle_private_message(state, user_id, user, text_raw, photo):
     uid = str(user_id)
-    text_cmd = text_raw.lower().split("@")[0]  # на случай /команда@BotName
+    cmd, rest = extract_command(text_raw)
 
     # --- команды только для админа ---
     if user_id == ADMIN_ID:
-        if text_cmd == "/тест_статус":
+        if cmd == "тест_статус":
             reply_status(state, user_id)
             return True
-        if text_cmd == "/тест_время":
+        if cmd == "тест_время":
             force_check_announcement(state)
             return True
-        if text_cmd == "/тест_сброс":
+        if cmd == "тест_сброс":
             state["active_riddle"] = None
             state["pending"] = {}
-            send_message(user_id, "Состояние сброшено")
+            send_message(user_id, "🔄 Состояние сброшено")
             return True
 
-        if text_cmd == "/тест_победитель":
+        if cmd == "тест_победитель":
             riddle = state["active_riddle"]
             if not riddle:
-                send_message(user_id, "[тест] Активной загадки нет")
+                send_message(user_id, "😴 Активной загадки нет")
             elif riddle.get("winner_id"):
-                send_message(user_id, "[тест] Победитель уже назначен")
+                send_message(user_id, "⚠️ Победитель уже назначен")
             else:
                 riddle["winner_id"] = ADMIN_ID
                 riddle["winner_name"] = "Тестовый победитель"
-                send_message(user_id, "[тест] Победитель назначен ботом, можно проверять /тест_время")
+                send_message(user_id, "✅ Победитель назначен ботом, можно проверять /тест_время")
             return True
 
-        if text_cmd == "/тест_пинг":
-            send_message(user_id, f"[тест] Бот жив, время сейчас: {now_msk().strftime('%H:%M:%S')}")
+        if cmd == "тест_пинг":
+            send_message(user_id, f"🤖 Бот жив, время сейчас: {now_msk().strftime('%H:%M:%S')}")
             return True
 
-        if text_raw.lower().startswith("/broadcast"):
-            parts = text_raw.split(maxsplit=1)
-            caption = parts[1] if len(parts) > 1 else None
-
+        if cmd == "broadcast":
+            caption = rest.strip() if rest.strip() else None
             if photo:
                 file_id = photo[-1]["file_id"]
                 send_photo(CHAT_ID, file_id, caption=caption)
-                send_message(user_id, "Фото отправлено в чат")
+                send_message(user_id, "📤 Фото отправлено в чат")
             elif caption:
                 send_message(CHAT_ID, caption)
-                send_message(user_id, "Отправлено в чат")
+                send_message(user_id, "📤 Отправлено в чат")
             else:
-                send_message(user_id, "Напиши текст после команды (/broadcast текст) или пришли фото с подписью /broadcast текст")
+                send_message(user_id, "Напиши текст после команды (broadcast текст) или пришли фото с подписью broadcast текст")
             return True
 
-        if text_cmd == "/подсказка":
+        if cmd == "подсказка":
             riddle = state["active_riddle"]
             if not riddle:
-                send_message(user_id, "Активной загадки нет, подсказывать нечего")
+                send_message(user_id, "😴 Активной загадки нет, подсказывать нечего")
             else:
                 first_letter = riddle["answer"].strip()[0].upper()
                 send_message(CHAT_ID, f"💡 Подсказка: слово начинается на букву «{first_letter}»")
-                send_message(user_id, "Подсказка отправлена в чат")
+                send_message(user_id, "📤 Подсказка отправлена в чат")
             return True
 
-        if text_cmd == "/топ":
+        if cmd == "топ":
             text = format_leaderboard(state)
-            send_message(user_id, text or "Пока ни у кого нет очков")
+            send_message(user_id, text or "Пока ни у кого нет очков в копилке")
+            return True
+
+        if cmd in ("сброс_счета", "сброс_счёта"):
+            state["scores"] = {}
+            send_message(user_id, "🧹 Счёт всем обнулён")
             return True
 
     # --- начать новую загадку ---
-    if text_cmd == "/загадать":
+    if cmd == "загадать":
         if state["active_riddle"]:
-            send_message(user_id, "Сейчас уже есть активная загадка, дождись пока её отгадают")
+            send_message(user_id, "⏳ Не так быстро — сейчас уже есть активная загадка, дождись пока её отгадают")
         else:
             state["pending"][uid] = {"stage": "awaiting_photo"}
-            send_message(user_id, "Приши мне фото крупным планом (можно сразу с подписью - названием предмета, тогда отвечать отдельным сообщением не понадобится)")
+            send_message(user_id, "📸 Скидывай фото! Можно сразу с подписью — что это, тогда сразу опубликую в чат")
         return True
 
     # --- отменить свою загадку ---
-    if text_cmd == "/отмена":
+    if cmd == "отмена":
         riddle = state["active_riddle"]
         if riddle and (riddle["author_id"] == user_id or user_id == ADMIN_ID):
             state["active_riddle"] = None
-            send_message(user_id, "Загадка отменена")
+            send_message(user_id, "🗑 Загадка отменена")
         else:
-            send_message(user_id, "Нет активной загадки, которую можно отменить")
+            send_message(user_id, "🤷 Отменять нечего — активной загадки сейчас нет")
         return True
 
     # --- шаги оформления загадки ---
@@ -317,13 +341,13 @@ def handle_private_message(state, user_id, user, text_raw, photo):
                 "winner_name": None,
             }
             state["pending"].pop(uid, None)
-            send_photo(CHAT_ID, file_id, caption="Угадайте что это? 🔍")
-            send_message(user_id, "Принято! Опубликовал в чат 🔍")
+            send_photo(CHAT_ID, file_id, caption="🔍 Угадайте что это?")
+            send_message(user_id, "✅ Готово! Уже опубликовал в чат, ждём угадаек 👀")
             return True
 
         # фото без подписи - как раньше, просим название отдельным сообщением
         state["pending"][uid] = {"stage": "awaiting_answer", "photo_file_id": file_id}
-        send_message(user_id, "Записал! А теперь напиши, что это")
+        send_message(user_id, "👌 Фото поймал! А теперь напиши мне, что это такое")
         return True
 
     if pending and pending["stage"] == "awaiting_answer" and text_raw:
@@ -336,12 +360,14 @@ def handle_private_message(state, user_id, user, text_raw, photo):
             "winner_name": None,
         }
         state["pending"].pop(uid, None)
-        send_photo(CHAT_ID, state["active_riddle"]["photo_file_id"], caption="Угадайте что это? 🔍")
-        send_message(user_id, "Принято! Опубликовал в чат 🔍")
+        send_photo(CHAT_ID, state["active_riddle"]["photo_file_id"], caption="🔍 Угадайте что это?")
+        send_message(user_id, "🚀 Загадка улетела в чат!")
         return True
 
     # ✅ Молчим на случайные сообщения если пользователь не в процессе загадки
-    if not pending and not text_cmd.startswith("/"):
+    if not pending and cmd is None:
+        return False
+    if not pending:
         return False
 
     return False
@@ -350,20 +376,25 @@ def handle_private_message(state, user_id, user, text_raw, photo):
 def reply_status(state, admin_id):
     riddle = state["active_riddle"]
     if not riddle:
-        send_message(admin_id, "[тест] Активной загадки нет")
+        send_message(admin_id, "😴 Активной загадки нет")
         return
-    has_guess = "да" if riddle.get("winner_id") else "нет"
+    has_guess = "да ✅" if riddle.get("winner_id") else "нет ❌"
     text = (
-        f"[тест] Активная загадка есть\n"
-        f"Создана: {riddle['created_date']}\n"
-        f"Кто-то уже угадал: {has_guess}"
+        f"📋 Загадка активна\n"
+        f"📅 создана: {riddle['created_date']}\n"
+        f"🎯 угадал кто-то: {has_guess}"
     )
     send_message(admin_id, text)
 
 
 def announce_winner(state, riddle):
     """Общая логика объявления победителя: сообщение в чат + начисление очков."""
-    text = f"🎉 {riddle['winner_name']} угадал(а)! Ответ был: {riddle['answer']}"
+    winner_name = riddle["winner_name"]
+    author_name = state["names"].get(str(riddle["author_id"]), "автор загадки")
+    text = (
+        f"🎉 {winner_name} угадал(а)! Ответ был: {riddle['answer']}\n"
+        f"🏆 +1 {winner_name}, +1 {author_name} (за загадку)"
+    )
     send_message(CHAT_ID, text)
     award_points(state, riddle["winner_id"], 1)
     award_points(state, riddle["author_id"], 1)
@@ -374,9 +405,9 @@ def force_check_announcement(state):
     riddle = state["active_riddle"]
     if riddle and riddle.get("winner_id"):
         announce_winner(state, riddle)
-        send_message(ADMIN_ID, "[тест] Объявление отправлено, очки начислены, загадка закрыта")
+        send_message(ADMIN_ID, "✅ Объявление отправлено, очки начислены, загадка закрыта")
     else:
-        send_message(ADMIN_ID, "[тест] Пока никто не угадал, объявления не будет")
+        send_message(ADMIN_ID, "🤷 Пока никто не угадал, объявления не будет")
 
 
 # ---------- обработка сообщений в группе ----------
@@ -426,7 +457,7 @@ def check_periodic_leaderboard(state):
         if state.get("last_weekly_post") != wk:
             text = format_leaderboard(state)
             if text:
-                send_message(CHAT_ID, "📅 Итоги недели:\n" + text)
+                send_message(CHAT_ID, "📅 Итоги недели, топ угадывателей:\n" + text)
             state["last_weekly_post"] = wk
 
     # 1 числа месяца - топ месяца
@@ -435,7 +466,7 @@ def check_periodic_leaderboard(state):
         if state.get("last_monthly_post") != mk:
             text = format_leaderboard(state)
             if text:
-                send_message(CHAT_ID, "🗓 Итоги месяца:\n" + text)
+                send_message(CHAT_ID, "🗓 Итоги месяца, кто был на высоте:\n" + text)
             state["last_monthly_post"] = mk
 
 
@@ -470,7 +501,7 @@ def check_healthcheck(state):
     if state.get("last_healthcheck_date") == today:
         return
 
-    send_message(ADMIN_ID, f"✅ Бот жив, всё работает. {now.strftime('%d.%m.%Y %H:%M')} МСК")
+    send_message(ADMIN_ID, f"✅ Всё живо-здорово, бот на связи! {now.strftime('%d.%m.%Y %H:%M')} МСК")
     state["last_healthcheck_date"] = today
 
 
